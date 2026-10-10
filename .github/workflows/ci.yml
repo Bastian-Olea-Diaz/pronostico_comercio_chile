@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/preparar
+        with:
+          base-ref: ${{ vars.BASE_REF || 'main' }}
+      - name: Tests (datos sintéticos, sin red)
+        run: python -m pytest tests -q
+
+  imagen-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir la imagen de la API
+        run: docker build -f api/Dockerfile -t pronostico-api .

@@ -1,0 +1,99 @@
+name: Actualización mensual
+
+# Revisa todos los días si Aduanas publicó un mes nuevo. Si no hay novedades termina en segundos; cuando lo
+# hay, procesa el mes, publica una release con modelos y pronósticos y actualiza resumen.json en GitHub Pages.
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      mes:
+        description: "Mes a procesar (AAAA-MM). Vacío = el siguiente al último procesado"
+        required: false
+
+concurrency:
+  group: pipeline
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      actualizado: ${{ steps.run.outputs.codigo == '0' }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRONOSTICO_STATE: state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/preparar
+        with:
+          base-ref: ${{ vars.BASE_REF || 'main' }}
+          unrar: "true"
+
+      - name: Descargar el estado de la última release
+        run: gh release download --pattern '*' --dir state
+
+      - name: Procesar el mes
+        id: run
+        run: |
+          set +e
+          python -m pronostico.pipeline run ${{ inputs.mes && format('--mes {0}', inputs.mes) || '' }}
+          code=$?
+          set -e
+          echo "codigo=$code" >> "$GITHUB_OUTPUT"
+          # 0 = actualizado, 2 = detenido por calidad de datos, 10 = sin mes nuevo; cualquier otro es un error
+          case $code in 0|2|10) ;; *) exit $code ;; esac
+
+      - name: Publicar release
+        if: steps.run.outputs.codigo == '0'
+        run: |
+          mes=$(python -c "import json; print(json.load(open('state/estado.json'))['ultimo_mes'])")
+          gh release create "datos-$mes" state/*.* --title "Datos hasta $mes" --notes-file state/reporte.md
+          echo "MES=$mes" >> "$GITHUB_ENV"
+
+      - name: Abrir issue si hay alertas
+        if: steps.run.outputs.codigo == '0'
+        run: |
+          n=$(python -c "import json; print(len(json.load(open('state/estado.json'))['alertas']))")
+          if [ "$n" -gt 0 ]; then
+            gh issue create --title "Alertas del pronóstico ($MES)" --body-file state/reporte.md
+          fi
+
+      - name: Abrir issue si el pipeline se detuvo
+        if: steps.run.outputs.codigo == '2'
+        run: |
+          # el workflow corre a diario: no repetir el issue mientras siga abierto
+          title="Pipeline detenido por calidad de datos"
+          if [ -z "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then
+            gh issue create --title "$title" --body-file state/reporte.md
+          fi
+
+      - name: Generar resumen para el portafolio
+        if: steps.run.outputs.codigo == '0'
+        env:
+          TABLERO_URL: ${{ vars.TABLERO_URL }}
+          API_URL: ${{ vars.API_URL }}
+        run: python -m pronostico.resumen --estado state --salida site
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.run.outputs.codigo == '0'
+        with:
+          path: site
+
+  pages:
+    needs: pipeline
+    if: needs.pipeline.outputs.actualizado == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

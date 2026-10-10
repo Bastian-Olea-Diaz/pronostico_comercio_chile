@@ -1,0 +1,57 @@
+name: Estado inicial
+
+# Se ejecuta una vez (o para reconstruir todo): descarga la historia completa desde datos.gob.cl (~1 GB),
+# entrena los primeros modelos y publica la primera release y resumen.json. Tarda unos 40 minutos.
+on:
+  workflow_dispatch:
+    inputs:
+      hasta:
+        description: "Último mes a incluir (AAAA-MM), el último publicado por Aduanas"
+        required: true
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRONOSTICO_STATE: state
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/preparar
+        with:
+          base-ref: ${{ vars.BASE_REF || 'main' }}
+          unrar: "true"
+
+      - name: Construir el estado inicial
+        run: python -m pronostico.pipeline bootstrap --hasta "${{ inputs.hasta }}"
+
+      - name: Publicar la primera release
+        run: |
+          gh release create "datos-${{ inputs.hasta }}" state/*.* --title "Datos hasta ${{ inputs.hasta }} (estado inicial)" \
+            --notes-file state/reporte.md
+
+      - name: Generar resumen para el portafolio
+        env:
+          TABLERO_URL: ${{ vars.TABLERO_URL }}
+          API_URL: ${{ vars.API_URL }}
+        run: python -m pronostico.resumen --estado state --salida site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,45 @@
+name: Desplegar API
+
+# Copia la API a un Space de Hugging Face (Docker), que la construye y la sirve. Necesita el secreto HF_TOKEN
+# (token con permiso de escritura) y la variable HF_SPACE (por ejemplo "usuario/pronostico-comercio-chile").
+on:
+  push:
+    branches: [main]
+    paths: ["api/**", "src/pronostico/__init__.py", "src/pronostico/artifacts.py"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: vars.HF_SPACE != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Armar el repositorio del Space
+        run: |
+          mkdir -p space/src/pronostico space/api
+          cp api/Dockerfile space/Dockerfile
+          cp api/requirements.txt api/__init__.py api/main.py space/api/
+          cp src/pronostico/__init__.py src/pronostico/artifacts.py space/src/pronostico/
+          cat > space/README.md <<'EOF'
+          ---
+          title: Pronóstico del comercio exterior de Chile
+          colorFrom: blue
+          colorTo: yellow
+          sdk: docker
+          app_port: 7860
+          pinned: false
+          ---
+          API de pronósticos mensuales. Código: https://github.com/Bastian-Olea-Diaz/pronostico_comercio_chile
+          EOF
+      - name: Publicar en Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          cd space
+          git init -q -b main
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add -A
+          git commit -q -m "API desde ${GITHUB_SHA::7}"
+          user="${{ vars.HF_SPACE }}"; user="${user%%/*}"
+          git push -f "https://${user}:${HF_TOKEN}@huggingface.co/spaces/${{ vars.HF_SPACE }}" main

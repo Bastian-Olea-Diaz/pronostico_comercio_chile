@@ -1,0 +1,33 @@
+name: Preparar entorno
+description: Python, el paquete comercio_chile (repositorio de análisis) y este paquete.
+inputs:
+  base-ref:
+    description: Rama, etiqueta o commit del repositorio de análisis
+    default: main
+  unrar:
+    description: Instalar UnRAR (solo lo necesita el pipeline, para los archivos de Aduanas)
+    default: "false"
+runs:
+  using: composite
+  steps:
+    # comercio_chile se instala en modo editable desde una copia del repositorio porque lee sus tablas de
+    # referencia (diccionario de datos, códigos de países) desde la carpeta references/
+    - uses: actions/checkout@v4
+      with:
+        repository: Bastian-Olea-Diaz/analisis_comercio_chile
+        ref: ${{ inputs.base-ref }}
+        path: base
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: |
+          pyproject.toml
+          base/pyproject.toml
+    - if: inputs.unrar == 'true'
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq unrar
+    - shell: bash
+      run: |
+        pip install -q -e ./base -e ".[api,dev]"
+        echo "BASE_SHA=$(git -C base rev-parse HEAD)" >> "$GITHUB_ENV"

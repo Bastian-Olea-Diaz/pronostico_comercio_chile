@@ -1,0 +1,41 @@
+name: Publicar resumen
+
+# Regenera resumen.json desde la última release y lo publica en GitHub Pages, sin procesar datos ni reentrenar.
+# Útil después de cambiar las variables TABLERO_URL o API_URL, o si hubo que volver a publicar el sitio.
+on:
+  workflow_dispatch:
+
+jobs:
+  resumen:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q -e .
+      - name: Descargar la última release
+        run: gh release download --pattern '*' --dir state
+      - name: Generar resumen
+        env:
+          TABLERO_URL: ${{ vars.TABLERO_URL }}
+          API_URL: ${{ vars.API_URL }}
+        run: python -m pronostico.resumen --estado state --salida site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  pages:
+    needs: resumen
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
