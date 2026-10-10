@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import zipfile
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -171,9 +172,9 @@ def bootstrap(through: str, state: Path = STATE, local_data: Path | None = None)
         log = pd.read_csv(local_data / "interim" / "_ingest_log.csv")
         panels = {f: pd.read_parquet(local_data / "processed" / f"panel_{f}.parquet") for f in sources.FLOWS}
     else:   # reconstrucción completa desde datos.gob.cl (~1 GB, ~30 min)
+        # Las funciones, no ingest.main(): ese main lee sys.argv con argparse y fallaría con "bootstrap --hasta".
         download.main()
-        ingest.main()
-        log = pd.read_csv(ingest.INTERIM / "_ingest_log.csv")
+        log = pd.DataFrame([asdict(ingest.process(*job, force=True)) for job in ingest.sources()])
         panels = {f: clean.build_panel(f)[0] for f in sources.FLOWS}
     log = log[pd.PeriodIndex.from_fields(year=log.year, month=log.month, freq="M") <= end]
     log.drop(columns=["invalid_samples"], errors="ignore").to_csv(state / A.INGEST, index=False)
