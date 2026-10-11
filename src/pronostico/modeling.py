@@ -16,6 +16,8 @@ from comercio_chile.features import Grid, regular_mask
 from .artifacts import FORECASTS, TOTALS
 
 HORIZONS = (1, 2, 3)
+INTERVAL_LEVEL = 0.80
+INTERVAL_WINDOW = 12      # meses de errores pasados que calibran el intervalo
 _BASE = F.ModelConfig().params
 CONFIGS = {
     "l1": F.ModelConfig(params={**_BASE, "objective": "l1"}, target="delta"),
@@ -104,6 +106,34 @@ def sanity_check(fc: pd.DataFrame, grid: Grid, t0: int) -> list[str]:
     return problems
 
 
-def write_forecasts(fc: pd.DataFrame, folder: Path) -> None:
+def add_intervals(tot: pd.DataFrame, performance: pd.DataFrame, level: float = INTERVAL_LEVEL,
+                  window: int = INTERVAL_WINDOW) -> pd.DataFrame:
+    """Intervalo conformal para cada total: pronóstico × e^(±q), donde q es el error |log(observado / pronosticado)|
+    en la posición ⌈(n + 1) · nivel⌉ de los últimos `window` meses evaluados con el mismo horizonte (backtest y
+    producción). El notebook 09 del proyecto de análisis mostró que la banda anterior, el error relativo
+    promedio, cubría menos de lo que aparentaba, porque un promedio no es un cuantil."""
+    from comercio_chile.intervals import conformal_quantile, log_ratio_score, total_interval
+
+    perf = performance.dropna(subset=["total_pronosticado", "total_observado"])
+    perf = perf[(perf.total_pronosticado > 0) & (perf.total_observado > 0)]
+    out = tot.copy()
+    for col in ("inferior", "superior", "calibracion_meses"):
+        out[col] = np.nan
+    for i, r in out.iterrows():
+        past = perf[(perf.flujo == r.flujo) & (perf.h == r.h)].sort_values("periodo")
+        past = past.drop_duplicates("periodo", keep="last").tail(window)   # producción reemplaza al backtest del mismo mes
+        q = conformal_quantile(log_ratio_score(past.total_observado, past.total_pronosticado), level)
+        if np.isfinite(q):
+            out.loc[i, ["inferior", "superior"]] = total_interval([r.total], q)[0][0], total_interval([r.total], q)[1][0]
+        out.loc[i, "calibracion_meses"] = len(past)
+    out["nivel"] = level
+    return out
+
+
+def write_forecasts(fc: pd.DataFrame, folder: Path, performance: pd.DataFrame | None = None) -> pd.DataFrame:
     fc.to_parquet(folder / FORECASTS, index=False)
-    totals(fc).to_parquet(folder / TOTALS, index=False)
+    tot = totals(fc)
+    if performance is not None:
+        tot = add_intervals(tot, performance)
+    tot.to_parquet(folder / TOTALS, index=False)
+    return tot

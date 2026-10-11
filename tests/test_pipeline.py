@@ -23,14 +23,34 @@ def run(folder, local_data, **kw):
 
 def test_bootstrap_creates_every_artifact(state):
     for name in [A.STATUS, A.FORECASTS, A.TOTALS, A.PERFORMANCE, A.DRIFT, A.INGEST, A.MODELS, A.REPORT,
-                 A.FORECAST_HISTORY, A.LABELS, A.COUNTRIES]:
+                 A.FORECAST_HISTORY, A.TOTALS_HISTORY, A.LABELS, A.COUNTRIES]:
         assert (state / name).exists(), name
     status = A.read_status(state)
     assert status["ultimo_mes"] == "2026-04" and status["proximo_mes"] == "2026-05"
     fc = pd.read_parquet(state / A.FORECASTS)
     assert set(fc.objetivo) == {"2026-05", "2026-06", "2026-07"}
     assert (fc[["pronostico", "pronostico_media", "media_movil_3"]] >= 0).all().all()
-    assert (pd.read_csv(state / A.PERFORMANCE).fuente == "backtest").all()
+    perf = pd.read_csv(state / A.PERFORMANCE)
+    assert (perf.fuente == "backtest").all() and set(perf.h) == {1, 2, 3}   # el backtest calibra cada horizonte
+
+
+def test_totals_have_conformal_intervals(state):
+    tot = pd.read_parquet(state / A.TOTALS)
+    assert len(tot) == 6 and (tot.nivel == modeling.INTERVAL_LEVEL).all()
+    assert ((tot.inferior < tot.total) & (tot.total < tot.superior)).all()
+    assert (tot.calibracion_meses >= 10).all()
+    # el intervalo es multiplicativo y simétrico en escala log: total² = inferior · superior
+    assert np.allclose(tot.total ** 2, tot.inferior * tot.superior)
+    assert "Rango 80%" in (state / A.REPORT).read_text(encoding="utf-8")
+
+
+def test_labels_come_from_product_names(state, tmp_path):
+    names = tmp_path / "hs6_nombres.csv"
+    pd.DataFrame({"hs6": ["020130", "270900"], "nombre": ["Carne de bovino deshuesada", "Petróleo crudo"],
+                  "fuente": ["declaraciones", "declaraciones"]}).to_csv(names, index=False)
+    labels = pipeline.labels_from_names(names)
+    assert list(labels.columns) == ["hs6", "etiqueta"] and labels.hs6.tolist() == ["020130", "270900"]
+    assert list(A.read(state, A.LABELS).columns) == ["hs6", "etiqueta"]
 
 
 def test_quality_alert_stops_without_touching_state(state, local_data, tmp_path):
@@ -67,6 +87,8 @@ def test_monthly_runs_update_state_and_evaluate_every_horizon(state, local_data,
     live = perf[perf.fuente == "producción"]
     assert set(map(tuple, live[["periodo", "h"]].to_numpy())) == {("2026-05", 1), ("2026-06", 1), ("2026-06", 2)}
     assert all(d["modelo"] == "nuevo" for d in status["modelos"].values())
+    # cada total evaluado se compara con el intervalo que se publicó para él
+    assert live.dentro_intervalo.notna().all() and live.total_inferior.lt(live.total_superior).all()
 
     # reprocesar un mes ya procesado no cambia nada; saltarse un mes es un error
     assert run(folder, local_data, month="2026-06") == pipeline.EXIT_NO_NEWS
@@ -75,6 +97,20 @@ def test_monthly_runs_update_state_and_evaluate_every_horizon(state, local_data,
     assert len(pd.read_csv(folder / A.PERFORMANCE)) == len(perf)
     panel = pd.read_parquet(folder / A.PANEL.format(flow="exportaciones"))
     assert not panel.duplicated(["periodo", "segmento", "hs6", "pais"]).any()
+
+
+def test_old_state_gets_backtest_for_every_horizon(state, local_data, tmp_path):
+    """Un estado creado antes de los intervalos (backtest solo a 1 mes, totales sin rango) se completa solo
+    en la siguiente actualización mensual."""
+    folder = tmp_path / "estado"
+    shutil.copytree(state, folder)
+    perf = pd.read_csv(folder / A.PERFORMANCE)
+    perf[perf.h == 1].to_csv(folder / A.PERFORMANCE, index=False)
+    (folder / A.TOTALS_HISTORY).unlink()
+    assert run(folder, local_data) == pipeline.EXIT_UPDATED
+    perf = pd.read_csv(folder / A.PERFORMANCE)
+    assert set(perf[perf.fuente == "backtest"].h) == {1, 2, 3}
+    assert pd.read_parquet(folder / A.TOTALS).inferior.notna().all()
 
 
 def test_broken_model_falls_back_to_previous(state, local_data, tmp_path, monkeypatch):

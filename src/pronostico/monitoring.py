@@ -63,19 +63,38 @@ def evaluate(previous: pd.DataFrame, grid: Grid, month: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def backtest(grid: Grid, flow: str, months: list[str]) -> pd.DataFrame:
-    """Desempeño a 1 mes en meses ya observados, reentrenando cada mes como en producción. Sirve de
-    referencia para el gráfico de control: lo que es normal para este modelo, no un umbral inventado."""
+def interval_hits(perf: pd.DataFrame, totals_history: pd.DataFrame) -> pd.DataFrame:
+    """Agrega a la evaluación del mes el intervalo que se había publicado para ese total y si el valor real
+    cayó dentro: la cobertura de los intervalos se mide en vivo, no se supone."""
+    cols = ["flujo", "objetivo", "h", "inferior", "superior"]
+    if not set(cols) <= set(totals_history.columns):
+        return perf
+    pub = totals_history[cols].rename(columns={"objetivo": "periodo", "inferior": "total_inferior", "superior": "total_superior"})
+    out = perf.merge(pub, on=["flujo", "periodo", "h"], how="left")
+    known = out.total_inferior.notna()
+    out["dentro_intervalo"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    out.loc[known, "dentro_intervalo"] = (out.total_observado >= out.total_inferior) & (out.total_observado <= out.total_superior)
+    return out
+
+
+def backtest(grid: Grid, flow: str, months: list[str], horizons=(1,)) -> pd.DataFrame:
+    """Desempeño en meses ya observados, reentrenando cada mes como en producción. Sirve de referencia para
+    el gráfico de control (h = 1: lo que es normal para este modelo, no un umbral inventado) y sus errores del
+    total calibran los intervalos de predicción de cada horizonte."""
     from .modeling import CONFIGS
 
-    wf = F.walk_forward(grid, 1, months, CONFIGS["l1"])
-    totals = F.walk_forward(grid, 1, months, CONFIGS["tweedie"]).groupby("periodo").modelo.sum()   # total: modelo de media
     rows = []
-    for month, g in wf.groupby("periodo"):
-        model, base = F.metrics(g.y.values, g.modelo.values), F.metrics(g.y.values, g.media_movil_3.values)
-        rows.append({"flujo": flow, "periodo": month, "h": 1, "fuente": "backtest", "WAPE": model["WAPE"],
-                     "WAPE_media_movil_3": base["WAPE"], "sesgo": model["sesgo_total"], "series": len(g),
-                     "total_observado": g.y.sum(), "total_pronosticado": totals[month]})
+    for h in horizons:
+        feasible = [m for m in months if grid.t_of(m) - 2 * h >= F.FIRST_ORIGIN]   # con al menos un origen de entrenamiento
+        if not feasible:
+            continue
+        wf = F.walk_forward(grid, h, feasible, CONFIGS["l1"])
+        totals = F.walk_forward(grid, h, feasible, CONFIGS["tweedie"]).groupby("periodo").modelo.sum()   # total: modelo de media
+        for month, g in wf.groupby("periodo"):
+            model, base = F.metrics(g.y.values, g.modelo.values), F.metrics(g.y.values, g.media_movil_3.values)
+            rows.append({"flujo": flow, "periodo": month, "h": h, "fuente": "backtest", "WAPE": model["WAPE"],
+                         "WAPE_media_movil_3": base["WAPE"], "sesgo": model["sesgo_total"], "series": len(g),
+                         "total_observado": g.y.sum(), "total_pronosticado": totals[month]})
     return pd.DataFrame(rows)
 
 

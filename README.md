@@ -28,7 +28,7 @@ GitHub Actions (revisa a diario si hay un mes nuevo)
    ├─ release de GitHub (registro de modelos y datos)
    └─ resumen.json en GitHub Pages
           │
-          ├── API (FastAPI + Docker, Hugging Face Spaces)
+          ├── API (FastAPI + Docker, Render)
           ├── tablero (Streamlit Community Cloud)
           └── portafolio (lee resumen.json)
 ```
@@ -42,6 +42,19 @@ Algunas decisiones que tomé y por qué:
 - **Alertas y avisos separados.** En el proyecto de análisis vi que el drift de precios de 2026 fue persistente
   sin degradar el modelo; si eso abriera un issue cada mes, terminaría ignorando las alertas. Solo abren issue
   las alertas que piden acción (calidad, desempeño, modelo descartado); el drift queda como aviso informativo.
+- **API en el plan gratuito de Render.** Primero la iba a publicar en Hugging Face Spaces, pero los Spaces con
+  Docker dejaron de ser gratuitos. En Render el servicio se duerme tras 15 minutos sin uso y la primera consulta
+  tarda cerca de un minuto. Lo acepté porque, al despertar, descarga la última release y siempre sirve el mes
+  más reciente; el portafolio no depende de la API, sino de `resumen.json`.
+- **Un rango del 80% que se puede verificar.** Al principio publicaba una banda de "error típico" (el error
+  promedio de los últimos meses). Al evaluarla en el proyecto de análisis (notebook 09) vi que cubría solo el
+  65% de los casos: un promedio no es un cuantil. La reemplacé por un intervalo conformal: el pronóstico ×
+  e^(±q), donde q es el error que dejó atrás al 80% de los errores de los últimos 12 meses evaluados, por
+  horizonte. Cada intervalo queda guardado tal como se publicó, y cuando llega el dato real se registra si cayó
+  dentro, así que la cobertura se mide en vivo en vez de suponerse.
+- **Nombres de productos con consenso.** Los nombres salen del texto que más empresas usan para cada código; si
+  no hay consenso, de la glosa oficial del Arancel Aduanero. Antes elegía el texto con más valor, y un solo
+  exportador grande podía imponer su código interno.
 - **Un mes a la vez, sin saltos.** Reprocesar un mes ya procesado no cambia nada, y saltarse uno es un error.
 - **Honestidad del historial.** El historial "en vivo" empieza con el primer mes posterior al despliegue. Los
   meses anteriores se muestran como backtest, separados, porque esos datos ya existían cuando se evaluaron.
@@ -54,6 +67,7 @@ Algunas decisiones que tomé y por qué:
 | Desempeño | Error (WAPE) y sesgo del pronóstico contra lo observado, con un gráfico de control calibrado en el backtest; además, si pierde contra la media móvil dos meses seguidos | Alerta e issue |
 | Drift | PSI de las variables del modelo, mix de productos e índice de precios implícito | Aviso informativo |
 | Modelo nuevo | Valores negativos o faltantes, totales desproporcionados | Se reutiliza el modelo anterior y se alerta |
+| Intervalos | Si el total observado cayó dentro del rango del 80% publicado para él | Se registra la cobertura acumulada (en `desempeno.csv` y en el portafolio) |
 
 Los umbrales son los que calibré en el proyecto de análisis, donde no generaron falsas alarmas en un período de
 control.
@@ -71,7 +85,7 @@ src/pronostico/
 api/              FastAPI y Dockerfile
 dashboard/        tablero en Streamlit
 tests/            pruebas con datos sintéticos (sin red)
-.github/          tests, actualización mensual, estado inicial y despliegue de la API
+.github/          tests, actualización mensual, estado inicial y publicación del resumen
 ```
 
 ## Uso local
@@ -95,7 +109,7 @@ ARTIFACTS_DIR=state streamlit run dashboard/app.py
 ## Tecnologías
 
 Python · pandas · LightGBM · FastAPI · Docker · Streamlit · Altair · GitHub Actions · GitHub Releases ·
-GitHub Pages · Hugging Face Spaces · pytest
+GitHub Pages · Render · pytest
 
 ## Licencia de los datos
 

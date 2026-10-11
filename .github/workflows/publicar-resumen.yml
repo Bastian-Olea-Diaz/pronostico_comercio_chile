@@ -1,7 +1,8 @@
 name: Publicar resumen
 
 # Regenera resumen.json desde la última release y lo publica en GitHub Pages, sin procesar datos ni reentrenar.
-# Útil después de cambiar las variables TABLERO_URL o API_URL, o si hubo que volver a publicar el sitio.
+# Útil después de cambiar las variables TABLERO_URL o API_URL, de corregir nombres de productos en el
+# proyecto de análisis, o si hubo que volver a publicar el sitio.
 on:
   workflow_dispatch:
 
@@ -18,11 +19,20 @@ jobs:
       - run: pip install -q -e .
       - name: Descargar la última release
         run: gh release download --pattern '*' --dir state
+      # Nombres de productos vigentes del proyecto de análisis, para no esperar a la próxima actualización mensual
+      - uses: actions/checkout@v4
+        with:
+          repository: Bastian-Olea-Diaz/analisis_comercio_chile
+          ref: ${{ vars.BASE_REF || 'main' }}
+          path: base
+          sparse-checkout: references/codigos
       - name: Generar resumen
         env:
           TABLERO_URL: ${{ vars.TABLERO_URL }}
           API_URL: ${{ vars.API_URL }}
-        run: python -m pronostico.resumen --estado state --salida site
+        run: |
+          names=base/references/codigos/hs6_nombres.csv
+          python -m pronostico.resumen --estado state --salida site $([ -f "$names" ] && echo "--etiquetas $names")
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

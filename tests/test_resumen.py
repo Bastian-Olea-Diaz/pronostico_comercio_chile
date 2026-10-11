@@ -30,6 +30,10 @@ def test_schema(site):
         assert 0 < f["error_tipico"] < 1
         assert len(f["destacados"]) == resumen.TOP_PRODUCTS
         assert f["resumen"]["meses_evaluados"] == len(f["aciertos"]) == 1
+        assert all(p["inferior"] < p["valor"] < p["superior"] for p in f["pronostico"])
+        assert f["intervalo"]["nivel"] == 0.8 and f["intervalo"]["metodo"] == "conformal"
+        assert isinstance(f["aciertos"][0]["dentro"], bool)
+        assert f["resumen"]["cobertura"]["evaluados"] == 1
     assert (out / "index.html").exists() and (out / "reporte.md").exists()
     assert (out / "resumen.json").stat().st_size < 50_000
 
@@ -40,3 +44,17 @@ def test_first_publication_has_no_live_track_record(site):
     f = first["flujos"]["exportaciones"]
     assert f["aciertos"] == [] and f["resumen"]["meses_evaluados"] == 0
     assert f["resumen"]["error_modelo"] is None and f["resumen"]["error_modelo_backtest"] > 0
+    assert f["resumen"]["cobertura"] == {"evaluados": 0, "dentro": 0}
+
+
+def test_labels_can_be_refreshed(local_data, tmp_path):
+    """Publicar resumen puede usar los nombres vigentes del proyecto de análisis sin reprocesar el mes."""
+    state = tmp_path / "estado"
+    pipeline.bootstrap("2026-04", state=state, local_data=local_data)
+    data = resumen.build(state)
+    top = data["flujos"]["exportaciones"]["destacados"][0]["hs6"]
+    names = tmp_path / "hs6_nombres.csv"
+    import pandas as pd
+    pd.DataFrame({"hs6": [top], "nombre": ["Nombre corregido"]}).to_csv(names, index=False)
+    fresh = resumen.build(state, labels_csv=names)
+    assert fresh["flujos"]["exportaciones"]["destacados"][0]["producto"] == "Nombre corregido"

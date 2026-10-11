@@ -78,11 +78,22 @@ def history_and_forecast(history: pd.DataFrame, forecast: pd.DataFrame, color: s
     lines = alt.Chart(df).mark_line(strokeWidth=2).encode(**enc)
     points = alt.Chart(df[(df.serie == "Pronóstico") & df.periodo.isin(forecast.periodo)]).mark_point(
         size=70, filled=True, color=color).encode(x="periodo:T", y="valor:Q", tooltip=enc["tooltip"])
-    return alt.layer(lines, points).properties(height=340, title=title).configure(locale=LOCALE)
+    layers = [lines, points]
+    if {"inferior", "superior"} <= set(forecast) and forecast.inferior.notna().all():
+        band = forecast.assign(inferior=forecast.inferior / divisor, superior=forecast.superior / divisor)
+        layers.insert(0, alt.Chart(band).mark_area(opacity=0.18, color=color).encode(
+            x="periodo:T", y="inferior:Q", y2="superior:Q",
+            tooltip=[alt.Tooltip("periodo:T", format="%B %Y", title="Mes"),
+                     alt.Tooltip("inferior:Q", format=",.1f", title=f"Rango 80%: desde ({unit})"),
+                     alt.Tooltip("superior:Q", format=",.1f", title=f"hasta ({unit})")]))
+    return alt.layer(*layers).properties(height=340, title=title).configure(locale=LOCALE)
 
 
 def title_es(text: str) -> str:
-    """Mayúscula inicial sin capitalizar artículos: 'Estados Unidos de América'."""
+    """Mayúscula inicial sin capitalizar artículos: 'Estados Unidos de América'. Los nombres de productos ya
+    vienen en formato de oración ('Cátodo de cobre') y se dejan como están."""
+    if not text.isupper():
+        return text
     return re.sub(r" (De|Del|La|Las|Los|Y|E|En|Con|Para|Sin) ", lambda m: m.group(0).lower(), text.title())
 
 
@@ -112,15 +123,21 @@ with tab_total:
     hist = panel.merge(keys).groupby("periodo", as_index=False).valor_usd.sum().tail(24).rename(columns={"valor_usd": "valor"})
     tot = data[A.TOTALS].query("flujo == @flow").rename(columns={"objetivo": "periodo", "total": "valor",
                                                                     "total_media_movil_3": "media_movil"})
+    has_band = {"inferior", "superior"} <= set(tot) and tot.inferior.notna().all()
     for col, r in zip(st.columns(len(tot)), tot.itertuples()):
         delta = r.valor / hist.valor.iloc[-1] - 1
         col.metric(f"Pronóstico {r.periodo}", f"US$ {es(r.valor / 1e6)} M",
                    f"{es(100 * delta, 1)}% vs {hist.periodo.iloc[-1]}", delta_color="off")
-    st.altair_chart(history_and_forecast(hist, tot[["periodo", "valor", "media_movil"]], color,
+        if has_band:
+            col.caption(f"Rango 80%: {es(r.inferior / 1e6)}–{es(r.superior / 1e6)} M")
+    cols = ["periodo", "valor", "media_movil"] + (["inferior", "superior"] if has_band else [])
+    st.altair_chart(history_and_forecast(hist, tot[cols], color,
                                          f"{flow.capitalize()}: series regulares ({es(len(keys))} pares producto–país)"),
                     use_container_width=True)
     st.caption("El total suma las series con comercio en al menos 10 de los últimos 12 meses (la mayor parte del valor). "
-               "Usa el modelo de media (Tweedie), porque sumar medianas subestima el total.")
+               "Usa el modelo de media (Tweedie), porque sumar medianas subestima el total."
+               + (" La banda es un intervalo conformal del 80%: su ancho se fija con los errores de los últimos 12 "
+                  "meses evaluados para que el valor real caiga dentro 8 de cada 10 veces." if has_band else ""))
 
 with tab_series:
     h1 = fc_all[fc_all.h == 1]

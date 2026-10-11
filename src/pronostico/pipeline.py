@@ -28,6 +28,7 @@ from . import ROOT
 from . import artifacts as A
 from . import monitoring as M
 from . import sources
+from .modeling import INTERVAL_LEVEL, INTERVAL_WINDOW
 
 STATE = Path(os.environ.get("PRONOSTICO_STATE", ROOT / "state"))
 EXIT_UPDATED, EXIT_STOPPED, EXIT_NO_NEWS = 0, 2, 10
@@ -63,14 +64,37 @@ def _append(path: Path, new: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     return new
 
 
-def _keep_history(fc: pd.DataFrame, state: Path, origins: int = 6) -> None:
+def _keep_history(fc: pd.DataFrame, state: Path, origins: int = 6, name: str = A.FORECAST_HISTORY,
+                  keys: tuple = ("flujo", "hs6", "pais", "origen", "h")) -> None:
     """Pronósticos de los últimos orígenes: los de 2 y 3 meses se evalúan cuando llega su mes objetivo,
-    después de que pronosticos.parquet ya se reemplazó por los del mes siguiente."""
-    path = state / A.FORECAST_HISTORY
+    después de que pronosticos.parquet ya se reemplazó por los del mes siguiente. Lo mismo para los totales
+    con su intervalo, que se guarda tal como se publicó para medir después si el valor real cayó dentro."""
+    path = state / name
     hist = pd.concat([pd.read_parquet(path), fc], ignore_index=True) if path.exists() else fc
-    hist = hist.drop_duplicates(["flujo", "hs6", "pais", "origen", "h"], keep="last")
+    hist = hist.drop_duplicates(list(keys), keep="last")
     keep = sorted(hist.origen.unique())[-origins:]
     hist[hist.origen.isin(keep)].to_parquet(path, index=False)
+
+
+def _keep_totals_history(tot: pd.DataFrame, state: Path) -> None:
+    _keep_history(tot, state, name=A.TOTALS_HISTORY, keys=("flujo", "origen", "h"))
+
+
+def _ensure_backtest(state: Path, grids: dict) -> pd.DataFrame | None:
+    """Los estados creados antes de los intervalos solo tienen backtest a 1 mes. Calcula una vez el de 2 y 3
+    meses, sobre los mismos meses, para calibrar los intervalos de esos horizontes."""
+    from .modeling import HORIZONS
+
+    perf = pd.read_csv(state / A.PERFORMANCE)
+    bt = perf[perf.fuente == "backtest"]
+    months = sorted(bt[bt.h == 1].periodo.unique())
+    missing = [h for h in HORIZONS if h not in set(bt.h)]
+    if not missing or not months:
+        return None
+    extra = pd.concat([M.backtest(g, f, months, missing) for f, g in grids.items()], ignore_index=True)
+    _append(state / A.PERFORMANCE, extra, ["flujo", "periodo", "h", "fuente"])
+    print(f"Backtest agregado para h = {missing} ({len(extra)} filas)")
+    return extra
 
 
 def _versions() -> dict:
@@ -105,10 +129,17 @@ def _train_and_forecast(panels: dict, month: str, state: Path, previous_models: 
     return pd.concat(forecasts, ignore_index=True), decisions
 
 
+def labels_from_names(names_csv: Path) -> pd.DataFrame:
+    """hs6_nombres.csv del proyecto de análisis (nombre declarado por consenso o glosa oficial del arancel)
+    -> etiquetas_hs6.csv (hs6, etiqueta), el formato que leen la API, el tablero y el resumen."""
+    names = pd.read_csv(names_csv, dtype={"hs6": str})
+    return names[["hs6", "nombre"]].rename(columns={"nombre": "etiqueta"})
+
+
 def _labels(state: Path) -> None:
     from comercio_chile.config import REFERENCES
 
-    shutil.copy(REFERENCES / "codigos" / "hs6_etiquetas_2025.csv", state / A.LABELS)
+    labels_from_names(REFERENCES / "codigos" / "hs6_nombres.csv").to_csv(state / A.LABELS, index=False)
     shutil.copy(REFERENCES / "codigos" / "paises.csv", state / A.COUNTRIES)
 
 
@@ -138,6 +169,7 @@ def _status(state: Path, month: str, decisions: dict, quality: list, drift: pd.D
                   for flow, g in drift.groupby("flujo")},
         "alertas": alerts,
         "avisos": notices,
+        "intervalos": {"nivel": INTERVAL_LEVEL, "metodo": "conformal", "meses_calibracion": INTERVAL_WINDOW},
     }
     (state / A.STATUS).write_text(json.dumps(status, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     return status
@@ -152,8 +184,14 @@ def _report(status: dict, totals: pd.DataFrame) -> str:
               "|---|---|---|---|---|"]
     lines += [f"| {r['flujo']} | {r['WAPE']:.1%} | {r['WAPE_media_movil_3']:.1%} | {r['sesgo']:+.1%} | {r['estado']} |"
               for r in status["desempeno"]] or ["| (primer mes en producción) | | | | |"]
-    lines += ["", "### Totales pronosticados (series regulares, US$ millones)", "", "| Flujo | Mes | Pronóstico | Media móvil 3 |", "|---|---|---|---|"]
-    lines += [f"| {r.flujo} | {r.objetivo} | {r.total / 1e6:,.0f} | {r.total_media_movil_3 / 1e6:,.0f} |" for r in totals.itertuples()]
+    def rng(r) -> str:
+        if "inferior" in totals and pd.notna(r.inferior):
+            return f"{r.inferior / 1e6:,.0f} – {r.superior / 1e6:,.0f}"
+        return "sin datos suficientes"
+    lines += ["", "### Totales pronosticados (series regulares, US$ millones)", "",
+              f"| Flujo | Mes | Pronóstico | Rango {INTERVAL_LEVEL:.0%} | Media móvil 3 |", "|---|---|---|---|---|"]
+    lines += [f"| {r.flujo} | {r.objetivo} | {r.total / 1e6:,.0f} | {rng(r)} | {r.total_media_movil_3 / 1e6:,.0f} |"
+              for r in totals.itertuples()]
     lines += ["", "### Modelos", *(f"- {flow}: {d['modelo']}" + (f" (motivo: {'; '.join(d['motivo'])})" if "motivo" in d else "")
                                    for flow, d in status["modelos"].items())]
     lines += ["", f"Versiones: pipeline `{status['versiones']['pipeline']}`, comercio_chile `{status['versiones']['comercio_chile']}`"]
@@ -184,18 +222,20 @@ def bootstrap(through: str, state: Path = STATE, local_data: Path | None = None)
     _labels(state)
 
     months = [str(end - k) for k in range(BACKTEST_MONTHS - 1, -1, -1)]
-    perf = pd.concat([M.backtest(grid_from_panel(p, f), f, months) for f, p in panels.items()], ignore_index=True)
+    from .modeling import HORIZONS
+    perf = pd.concat([M.backtest(grid_from_panel(p, f), f, months, HORIZONS) for f, p in panels.items()], ignore_index=True)
     perf.to_csv(state / A.PERFORMANCE, index=False)
     drift = pd.concat([M.data_drift(grid_from_panel(p, f), f, through) for f, p in panels.items()], ignore_index=True)
     drift.to_csv(state / A.DRIFT, index=False)
 
     fc, decisions = _train_and_forecast(panels, through, state, None)
-    from .modeling import write_forecasts, totals
-    write_forecasts(fc, state)
+    from .modeling import write_forecasts
+    tot = write_forecasts(fc, state, perf)
     _zip_models(state)
     _keep_history(fc, state)
+    _keep_totals_history(tot, state)
     status = _status(state, through, decisions, [], drift, [], [])
-    (state / A.REPORT).write_text(_report(status, totals(fc)), encoding="utf-8")
+    (state / A.REPORT).write_text(_report(status, tot), encoding="utf-8")
     print(f"Estado inicial listo: datos hasta {through}, {len(fc):,} pronósticos")
     return EXIT_UPDATED
 
@@ -242,19 +282,25 @@ def run(state: Path = STATE, month: str | None = None, fetch=sources.fetch_month
     # capa 1: drift de las entradas de esos pronósticos
     previous = pd.read_parquet(state / A.FORECAST_HISTORY)
     grids = {flow: grid_from_panel(p, flow) for flow, p in panels.items()}
+    _ensure_backtest(state, grids)
     perf = pd.concat([M.evaluate(previous[previous.flujo == f], g, month) for f, g in grids.items()], ignore_index=True)
-    _append(state / A.PERFORMANCE, perf, ["flujo", "periodo", "h", "fuente"])
+    totals_path = state / A.TOTALS_HISTORY
+    if totals_path.exists():   # ¿cayó el valor real dentro del intervalo publicado?
+        perf = M.interval_hits(perf, pd.read_parquet(totals_path))
+    performance = _append(state / A.PERFORMANCE, perf, ["flujo", "periodo", "h", "fuente"])
     drift = pd.concat([M.data_drift(g, f, month) for f, g in grids.items()], ignore_index=True)
     _append(state / A.DRIFT, drift, ["flujo", "periodo", "feature"])
 
     fc, decisions = _train_and_forecast(panels, month, state, modeling.load(_models_dir(state)))
-    modeling.write_forecasts(fc, state)
+    tot = modeling.write_forecasts(fc, state, performance)
     _zip_models(state)
     _keep_history(fc, state)
+    _keep_totals_history(tot, state)
+    _labels(state)
     notices = [f"Calidad {q['flujo']}: {k} = {v['valor']}" for q in quality for k, v in q["chequeos"].items() if v["estado"] == M.WARN]
     alerts = [f"Modelo {f}: se reutilizó el anterior ({'; '.join(d['motivo'])})" for f, d in decisions.items() if "motivo" in d]
     status = _status(state, month, decisions, quality, drift, alerts, notices)
-    (state / A.REPORT).write_text(_report(status, modeling.totals(fc)), encoding="utf-8")
+    (state / A.REPORT).write_text(_report(status, tot), encoding="utf-8")
     print(f"{month} procesado. Alertas: {len(status['alertas'])}")
     return EXIT_UPDATED
 
